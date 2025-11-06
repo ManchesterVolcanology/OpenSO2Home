@@ -2,29 +2,33 @@ import os
 import sys
 import yaml
 import logging
+import traceback
 import qdarktheme
 import pyqtgraph as pg
 from functools import partial
-from PySide2.QtCore import Qt, QObject, Slot, Signal, QThread
-from PySide2.QtGui import QIcon, QFont
-from PySide2.QtWidgets import (
+from datetime import datetime
+from PySide6.QtCore import Qt, QObject, Slot, Signal, QThread, QTime
+from PySide6.QtGui import QIcon, QFont, QAction
+from PySide6.QtWidgets import (
     QMainWindow, QApplication, QGridLayout, QScrollArea, QWidget, QTabWidget,
     QTextEdit, QLineEdit, QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox,
-    QAction, QFileDialog, QToolBar, QFrame, QSplitter, QPlainTextEdit,
-    QLabel, QPushButton, QDateTimeEdit, QDateEdit
+    QFileDialog, QToolBar, QFrame, QSplitter, QPlainTextEdit, QDialog,
+    QLabel, QPushButton, QDateTimeEdit, QDateEdit, QMessageBox, QFormLayout
 )
 
+from openso2gui.station import Station
 from openso2gui.plume import calc_end_point
+from openso2gui.gui_functions import SyncWorker, PostAnalysisWorker
 
-__version__ = '1.4'
+__version__ = '2.0'
 __author__ = 'Ben Esse'
 
 if not os.path.isdir('bin/'):
     os.makedirs('bin/')
 
 COLORS = [
-    '#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd', '#8c564b', '#e377c2',
-    '#7f7f7f', '#bcbd22', '#17becf'
+    '#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd', '#8c564b',
+    '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
 ]
 
 
@@ -446,9 +450,7 @@ class MainWindow(QMainWindow):
         logger.addHandler(self.handler)
         logger.setLevel(logging.INFO)
         layout.addWidget(self.logBox, 2, 0, 1, 5)
-        logger.info(
-            f'Welcome to OpenSO2 v{__version__}! Written by {__author__}'
-        )
+        logger.info(f'Welcome to OpenSO2 v{__version__}!')
 
 # =============================================================================
 #   Generate the program outputs
@@ -556,8 +558,6 @@ class MainWindow(QMainWindow):
 
         # Add station tabs
         self.stationTabs = {}
-        for station in self.stations.values():
-            self.add_station(station)
         layout.addWidget(self.stationTabHolder, 0, 0, 1, 10)
 
         # Add a button to control syncing
@@ -570,7 +570,7 @@ class MainWindow(QMainWindow):
         # Add a button to add a station
         self.add_station_btn = QPushButton('Add Station')
         self.add_station_btn.setFixedSize(150, 25)
-        self.add_station_btn.clicked.connect(self.newStation)
+        self.add_station_btn.clicked.connect(self.new_station)
         layout.addWidget(self.add_station_btn, 1, 1)
 
 # =============================================================================
@@ -666,8 +666,256 @@ class MainWindow(QMainWindow):
     def toggleSync(self):
         """Turn station syncing on and off."""
 
-    def newStation(self):
+    def newStation(self, name, com_info, loc_info, sync_flag,
+                   filter_spectra_flag=False):
         """Add a new station to the GUI."""
+        # Create the station object
+        self.stations[name] = Station(
+            name, com_info, loc_info, sync_flag, filter_spectra_flag
+        )
+
+        # Create the tab to hold the station widgets
+        self.stationTabs[name] = QWidget()
+        self.stationTabHolder.addTab(self.stationTabs[name], str(name))
+
+        # Set up the station layout
+        layout = QGridLayout(self.stationTabs[name])
+
+        # Add a status notifier
+        self.station_status[name] = QLabel('Status: -')
+        coln = 0
+        layout.addWidget(self.station_status[name], 0, coln)
+
+        # Add checkbox to sync the station or not
+        sync_flag = QLabel(f'Syncing: {sync_flag}')
+        layout.addWidget(sync_flag, 1, coln)
+
+        layout.addWidget(QVLine(), 0, coln+1, 2, 1)
+        coln += 2
+
+        # Add the station location
+        stat_lat = f'{abs(loc_info["latitude"])}'
+        if loc_info["latitude"] >= 0:
+            stat_lat += u"\N{DEGREE SIGN}N"
+        else:
+            stat_lat += u"\N{DEGREE SIGN}S"
+        stat_lon = f'{abs(loc_info["longitude"])}'
+        if loc_info["longitude"] >= 0:
+            stat_lon += u"\N{DEGREE SIGN}E"
+        else:
+            stat_lon += u"\N{DEGREE SIGN}W"
+        stat_loc = QLabel(f'Location: {stat_lat}, {stat_lon}')
+        layout.addWidget(stat_loc, 0, coln)
+
+        # Add the station altitude
+        stat_alt = QLabel(f'Altitude: {loc_info["altitude"]} m')
+        layout.addWidget(stat_alt, 1, coln)
+
+        layout.addWidget(QVLine(), 0, coln+1, 2, 1)
+        coln += 2
+
+        # Add the station orientation
+        stat_az = QLabel(f'Orientation: {loc_info["azimuth"]}'
+                         + u"\N{DEGREE SIGN}")
+        layout.addWidget(stat_az, 0, coln)
+
+        # Add option to filter the bad spectra from display
+        filter_spectra_cb = QCheckBox('Hide bad\nspectra?')
+        filter_spectra_cb.setChecked(filter_spectra_flag)
+        layout.addWidget(filter_spectra_cb, 1, coln)
+        filter_spectra_cb.stateChanged.connect(
+            lambda: self.update_scan_plot(
+                name,
+                f'{self.widgets.get("sync_folder")}/{datetime.now().date()}'
+            )
+        )
+
+        layout.addWidget(QVLine(), 0, coln+1, 2, 1)
+        coln += 2
+
+        # Add button to edit the station
+        edit_btn = QPushButton('Edit Station')
+        edit_btn.clicked.connect(lambda: self.edit_station(name))
+        layout.addWidget(edit_btn, 0, coln)
+
+        # Add button to delete the station
+        close_btn = QPushButton('Delete Station')
+        close_btn.clicked.connect(lambda: self.delStation(name))
+        layout.addWidget(close_btn, 1, coln)
+        coln += 1
+
+        # Add the station widgets to a dictionary
+        self.station_widgets[name] = {
+            'loc': stat_loc,
+            'az': stat_az,
+            'sync_flag': sync_flag,
+            'filter_spectra_flag': filter_spectra_cb
+        }
+
+        # Create the graphs
+        self.station_graphwin[name] = pg.GraphicsLayoutWidget(show=True)
+        pg.setConfigOptions(antialias=True)
+
+        # Make the graphs
+        ax0 = self.station_graphwin[name].addPlot(row=0, col=0)
+        x_axis = pg.DateAxisItem(utcOffset=0)
+        ax1 = self.station_graphwin[name].addPlot(
+            row=0, col=1, axisItems={'bottom': x_axis}
+        )
+        self.station_axes[name] = [ax0, ax1]
+
+        for ax in self.station_axes[name]:
+            ax.setDownsampling(mode='peak')
+            ax.setClipToView(True)
+            ax.showGrid(x=True, y=True)
+
+        # Add axis labels
+        ax0.setLabel('left', 'SO2 SCD [molec/cm2]')
+        ax1.setLabel('left', 'Scan Angle [deg]')
+        ax0.setLabel('bottom', 'Scan Angle [deg]')
+        ax1.setLabel('bottom', 'Time [UTC]')
+
+        # Initialise the scatter plot
+        so2_map = pg.ScatterPlotItem()
+        ax1.addItem(so2_map)
+        self.station_so2_map[name] = so2_map
+
+        # Initialise the colorbar
+        im = pg.ImageItem()
+        cbar = pg.ColorBarItem(values=(0, 1e18), colorMap=self.cmap)
+        cbar.setImageItem(im)
+        cbar.sigLevelsChangeFinished.connect(
+            lambda: self._update_map_colors(name))
+        self.station_cbar[name] = cbar
+        self.station_graphwin[name].addItem(self.station_cbar[name], 0, 2)
+
+        # Create a textbox to hold the station logs
+        self.station_log[name] = QPlainTextEdit(self)
+        self.station_log[name].setReadOnly(True)
+        self.station_log[name].setFont(QFont('Courier', 10))
+
+        # Add overview plot lines
+        stat_num = len(self.stations.keys())-1
+        pen = pg.mkPen(color=COLORS[stat_num], width=2)
+        fe0 = pg.ErrorBarItem(pen=pen)
+        fl0 = pg.PlotCurveItem(pen=pen)
+        fl1 = pg.PlotCurveItem(pen=pen)
+        fl2 = pg.PlotCurveItem(pen=pen)
+        self.flux_axes[0].addItem(fe0)
+        self.flux_axes[0].addItem(fl0)
+        self.flux_axes[1].addItem(fl1)
+        self.flux_axes[2].addItem(fl2)
+        self.flux_lines[name] = [fe0, fl0, fl1, fl2]
+        self.flux_legend.addItem(fl0, name)
+
+        # Add station to map plot
+        scatter = pg.ScatterPlotItem(
+            x=[loc_info['longitude']], y=[loc_info['latitude']],
+            brush=pg.mkBrush(COLORS[stat_num]), size=15
+        )
+        line1 = pg.PlotCurveItem(pen=pg.mkPen(COLORS[stat_num], width=4))
+        line2 = pg.PlotCurveItem(pen=pg.mkPen(COLORS[stat_num], width=2))
+        arrow = pg.ArrowItem(baseAngle=25, brush=pg.mkBrush(COLORS[stat_num]))
+        scatter.setToolTip(name)
+        line1.setToolTip('+ve')
+        line2.setToolTip('-ve')
+        self.map_ax.addItem(scatter)
+        self.map_ax.addItem(line1)
+        self.map_ax.addItem(line2)
+        self.map_ax.addItem(arrow)
+        self.map_plots[name] = [scatter, line1, line2, arrow]
+        self.update_station_map(name)
+
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(self.station_graphwin[name])
+        splitter.addWidget(self.station_log[name])
+        layout.addWidget(splitter, 2, 0, 1, coln)
+
+        logger.info(f'Added {name} station')
+
+    def delStation(self, name):
+        """Remove a station tab."""
+        # Get the index of the station tab
+        station_idx = [
+            i for i, key in enumerate(self.stationTabs.keys())
+            if name == key
+        ][0] + 2
+
+        # Remove the tab from the GUI
+        self.stationTabHolder.removeTab(station_idx)
+
+        # Delete the actual widget from memory
+        self.stationTabs[name].setParent(None)
+
+        # Remove the station from the stations dictionary
+        self.stations.pop(name)
+
+        # Remove the station from the flux legend
+        self.flux_legend.removeItem(name)
+
+        # Remove the station from the map
+        for item in self.map_plots[name]:
+            self.map_ax.removeItem(item)
+        self.map_plots.pop(name)
+
+        logger.info(f'Removed {name} station')
+
+    def new_station(self):
+        """Input new information for a station."""
+        dialog = NewStationWizard(self)
+        if dialog.exec():
+            self.newStation(**dialog.station_info)
+
+    def edit_station(self, name):
+        """Edit information for a station."""
+        station = self.stations[name]
+        dialog = EditStationWizard(self, station)
+        if dialog.exec():
+            # Edit the station object
+            self.stations[name] = dialog.station
+
+            # Edit the text on the station tab
+            loc_info = station.loc_info
+            stat_lat = f'{abs(loc_info["latitude"])}'
+            if loc_info["latitude"] >= 0:
+                stat_lat += u"\N{DEGREE SIGN}N"
+            else:
+                stat_lat += u"\N{DEGREE SIGN}S"
+            stat_lon = f'{abs(loc_info["longitude"])}'
+            if loc_info["longitude"] >= 0:
+                stat_lon += u"\N{DEGREE SIGN}E"
+            else:
+                stat_lon += u"\N{DEGREE SIGN}W"
+            self.station_widgets[name]['loc'].setText(
+                f'Location: {stat_lat}, {stat_lon}'
+            )
+            self.station_widgets[name]['az'].setText(
+                f'Orientation: {loc_info["azimuth"]}' + u"\N{DEGREE SIGN}"
+            )
+            self.station_widgets[name]['sync_flag'].setText(
+                f'Syncing: {station.sync_flag}'
+            )
+
+            # Update the station map
+            self.update_station_map(name)
+
+            logger.info(f'{name} station updated')
+
+    def update_station_map(self, name):
+        """Update station on the map."""
+        loc_info = self.stations[name].loc_info
+
+        x = loc_info['longitude']
+        y = loc_info['latitude']
+        az = loc_info['azimuth']
+        y1, x1 = calc_end_point([y, x], 2500, az-90)
+        y2, x2 = calc_end_point([y, x], 2500, az+90)
+        self.map_plots[name][0].setData(x=[x], y=[y])
+        self.map_plots[name][1].setData([x, x1], [y, y1])
+        self.map_plots[name][2].setData([x, x2], [y, y2])
+        self.map_plots[name][3].setPos(x, y)
+        self.map_plots[name][3].setStyle(angle=az+90)
+
 
     # =========================================================================
     # Program Global Slots
@@ -818,9 +1066,10 @@ class Widgets(dict):
             return self[key].isChecked()
         elif type(self[key]) in [QSpinBox, QDoubleSpinBox, SpinBox, DSpinBox]:
             return self[key].value()
+        elif isinstance(self[key], QDateTimeEdit):
+            return self[key].time().toString('HH:MM')
         else:
             raise ValueError('Widget type not recognised!')
-            return
 
     def set(self, key, value):
         """Set the value of a widget."""
@@ -838,8 +1087,176 @@ class Widgets(dict):
             self[key].setValue(int(value))
         elif type(self[key]) in [QDoubleSpinBox, DSpinBox]:
             self[key].setValue(float(value))
+        elif isinstance(self[key], QDateTimeEdit):
+            return self[key].setTime(QTime.fromString(value, 'HH:MM'))
         else:
             raise ValueError('Widget type not recognised!')
+
+
+class NewStationWizard(QDialog):
+    """Opens a wizard to define a new station."""
+
+    def __init__(self, parent=None):
+        """Initialise the window."""
+        super(NewStationWizard, self).__init__(parent)
+
+        # Set the window properties
+        self.setWindowTitle('Add new station')
+        self.station_data = {}
+
+        self._createApp()
+
+    def _createApp(self):
+        # Set the layout
+        layout = QFormLayout()
+
+        syncComboBox = QComboBox()
+        syncComboBox.addItems(['True', 'False'])
+
+        # Setup entry widgets
+        self.widgets = {'Name': QLineEdit(),
+                        'Latitude': QLineEdit(),
+                        'Longitude': QLineEdit(),
+                        'Altitude': QLineEdit(),
+                        'Azimuth': QLineEdit(),
+                        'Syncing': syncComboBox,
+                        'Host': QLineEdit(),
+                        'Username': QLineEdit(),
+                        'Password': QLineEdit()}
+        for key, item in self.widgets.items():
+            layout.addRow(key + ':', item)
+
+        # Add cancel and accept buttons
+        cancel_btn = QPushButton('Cancel')
+        cancel_btn.clicked.connect(self.cancel_action)
+        accept_btn = QPushButton('Accept')
+        accept_btn.clicked.connect(self.accept_action)
+        layout.addRow(cancel_btn, accept_btn)
+
+        self.setLayout(layout)
+
+    def accept_action(self):
+        """Record the station data and exit."""
+        try:
+            loc_info = {'latitude':  float(self.widgets['Latitude'].text()),
+                        'longitude': float(self.widgets['Longitude'].text()),
+                        'altitude':  float(self.widgets['Azimuth'].text()),
+                        'azimuth':   float(self.widgets['Azimuth'].text())}
+            com_info = {'host': self.widgets['Host'].text(),
+                        'username': self.widgets['Username'].text(),
+                        'password': self.widgets['Password'].text()}
+            if self.widgets['Syncing'].currentText() == 'True':
+                sync_flag = True
+            else:
+                sync_flag = False
+        except ValueError:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setText("Error adding station, please check input fields.")
+            msg.setWindowTitle("Error!")
+            msg.setDetailedText(traceback.format_exc())
+            msg.setStandardButtons(QMessageBox.Ok)
+            msg.exec()
+            return
+
+        self.station_info = {
+            'name': self.widgets['Name'].text(),
+            'loc_info': loc_info,
+            'com_info': com_info,
+            'sync_flag': sync_flag
+        }
+        self.accept()
+
+    def cancel_action(self):
+        """Close the window without creating a new station."""
+        self.station_info = {}
+        self.close()
+
+
+class EditStationWizard(QDialog):
+    """Opens a wizard to define a new station."""
+
+    def __init__(self, parent=None, station=None):
+        """Initialise the window."""
+        super(EditStationWizard, self).__init__(parent)
+
+        # Set the window properties
+        self.setWindowTitle(f'Edit {station.name} station')
+        self.station = station
+        self.loc_info = station.loc_info
+        self.com_info = station.com_info
+        self.sync_flag = station.sync_flag
+        self.station_data = {}
+
+        self._createApp()
+
+    def _createApp(self):
+        # Set the layout
+        layout = QFormLayout()
+
+        # Create sync flag widget
+        syncComboBox = QComboBox()
+        syncComboBox.addItems(['True', 'False'])
+        index = syncComboBox.findText(str(self.sync_flag), Qt.MatchFixedString)
+        if index >= 0:
+            syncComboBox.setCurrentIndex(index)
+
+        # Setup entry widgets
+        self.widgets = {
+            'Name': QLineEdit(str(self.station.name)),
+            'Latitude': QLineEdit(str(self.loc_info['latitude'])),
+            'Longitude': QLineEdit(str(self.loc_info['longitude'])),
+            'Altitude': QLineEdit(str(self.loc_info['altitude'])),
+            'Azimuth': QLineEdit(str(self.loc_info['azimuth'])),
+            'Syncing': syncComboBox,
+            'Host': QLineEdit(str(self.com_info['host'])),
+            'Username': QLineEdit(str(self.com_info['username'])),
+            'Password': QLineEdit(str(self.com_info['password']))}
+        for key, item in self.widgets.items():
+            layout.addRow(key + ':', item)
+
+        # Add cancel and accept buttons
+        cancel_btn = QPushButton('Cancel')
+        cancel_btn.clicked.connect(self.cancel_action)
+        accept_btn = QPushButton('Accept')
+        accept_btn.clicked.connect(self.accept_action)
+        layout.addRow(cancel_btn, accept_btn)
+
+        self.setLayout(layout)
+
+    def accept_action(self):
+        """Record the station data and exit."""
+        try:
+            loc_info = {'latitude':  float(self.widgets['Latitude'].text()),
+                        'longitude': float(self.widgets['Longitude'].text()),
+                        'altitude':  float(self.widgets['Azimuth'].text()),
+                        'azimuth':   float(self.widgets['Azimuth'].text())}
+            com_info = {'host': self.widgets['Host'].text(),
+                        'username': self.widgets['Username'].text(),
+                        'password': self.widgets['Password'].text()}
+            if self.widgets['Syncing'].currentText() == 'True':
+                sync_flag = True
+            else:
+                sync_flag = False
+        except ValueError:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setText("Error adding station, please check input fields.")
+            msg.setWindowTitle("Error!")
+            msg.setDetailedText(traceback.format_exc())
+            msg.setStandardButtons(QMessageBox.Ok)
+            msg.exec()
+            return
+
+        self.station.name = self.widgets['Name'].text()
+        self.station.loc_info = loc_info
+        self.station.com_info = com_info
+        self.station.sync_flag = sync_flag
+        self.accept()
+
+    def cancel_action(self):
+        """Close the window without editing the station."""
+        self.close()
 
 
 # Cliet Code
@@ -847,4 +1264,4 @@ if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = MainWindow(app)
     window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
