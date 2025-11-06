@@ -1081,6 +1081,7 @@ class MainWindow(QMainWindow):
     def sync_finished(self):
         """Signal end of sync."""
         logger.info('Sync complete')
+        self.statusBar().showMessage('Ready')
 
     def post_finished(self):
         """Signal end of post analysis."""
