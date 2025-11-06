@@ -7,7 +7,7 @@ import pandas as pd
 import xarray as xr
 from scipy.signal import savgol_filter
 from datetime import datetime, timedelta
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, QRunnable
 
 from openso2gui.plume import calc_plume_altitude, calc_scan_flux
 
@@ -33,7 +33,7 @@ class SyncWorker(QObject):
                  default_alt, default_az, wind_speed, scan_pair_time,
                  scan_pair_flag, min_scd, max_scd, min_int, max_int):
         """Initialize."""
-        super(QObject, self).__init__()
+        super().__init__()
         self.res_dir = res_dir
         self.stations = stations
         self.analysis_date = analysis_date

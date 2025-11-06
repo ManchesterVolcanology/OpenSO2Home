@@ -4,10 +4,13 @@ import yaml
 import logging
 import traceback
 import qdarktheme
+import numpy as np
+import pandas as pd
+import xarray as xr
 import pyqtgraph as pg
 from functools import partial
 from datetime import datetime
-from PySide6.QtCore import Qt, QObject, Slot, Signal, QThread, QTime
+from PySide6.QtCore import Qt, QObject, Slot, Signal, QThread, QTime, QTimer
 from PySide6.QtGui import QIcon, QFont, QAction
 from PySide6.QtWidgets import (
     QMainWindow, QApplication, QGridLayout, QScrollArea, QWidget, QTabWidget,
@@ -585,6 +588,18 @@ class MainWindow(QMainWindow):
             config[label] = self.widgets.get(label)
         config['theme'] = self.theme
 
+        # Add the station ssettings to the config
+        config['stations'] = {}
+        for name, station in self.stations.items():
+            config['stations'][name] = {
+                'com_info': station.com_info,
+                'loc_info': station.loc_info,
+                'sync_flag': station.sync_flag,
+                'filter_spectra_flag': self.station_widgets[name][
+                    'filter_spectra_flag'
+                ].isChecked()
+            }
+
         # Get save filename if required
         if asksavepath or self.config_fname is None:
             fname, _ = QFileDialog.getSaveFileName(
@@ -625,10 +640,21 @@ class MainWindow(QMainWindow):
 
             # Apply each config setting
             for label, value in config.items():
-                if label == 'theme':
-                    self.theme = value
-                else:
-                    self.widgets.set(label, value)
+                try:
+                    if label == 'theme':
+                        self.theme = value
+                    elif label == 'stations':
+                        for name in self.stations.copy().keys():
+                            self.del_station(name)
+                        for name, info in value.items():
+                            self.newStation(name, **info)
+                    else:
+                        self.widgets.set(label, value)
+                except Exception:
+                    logger.warning(
+                        f'Failed to load {label} from config file',
+                        exc_info=True
+                    )
 
             # Update the config file settings
             self.config_fname = fname
@@ -665,6 +691,125 @@ class MainWindow(QMainWindow):
 
     def toggleSync(self):
         """Turn station syncing on and off."""
+        # If syncing if ON, turn it OFF
+        if self.syncing:
+            self.sync_button.setText('Syncing OFF')
+            self.sync_button.setStyleSheet("background-color: red")
+            self.widgets['sync_interval'].setDisabled(False)
+            self.widgets['sync_interval'].setStyleSheet("color: white")
+            self.syncing = False
+            self.syncTimer.stop()
+
+        # If syncing is OFF, turn it ON
+        else:
+            self.sync_button.setText('Syncing ON')
+            self.sync_button.setStyleSheet("background-color: green")
+            self.syncing = True
+            interval = self.widgets.get('sync_interval') * 1000
+            self.widgets['sync_interval'].setDisabled(True)
+            self.widgets['sync_interval'].setStyleSheet("color: darkGray")
+            self._station_sync()
+            self.syncTimer = QTimer(self)
+            self.syncTimer.setInterval(interval)
+            self.syncTimer.timeout.connect(self._station_sync)
+            self.syncTimer.start()
+
+    def _station_sync(self):
+
+        # If the previous sync thread is still running, wait a cycle
+        try:
+            if self.syncThread.isRunning():
+                return
+        except AttributeError:
+            pass
+
+        # Pull the syncing times
+        sync_so2_start = datetime.strptime(
+            self.widgets.get('sync_so2_start'), "%H:%M").time()
+        sync_so2_stop = datetime.strptime(
+            self.widgets.get('sync_so2_stop'), "%H:%M").time()
+        sync_spec_start = datetime.strptime(
+            self.widgets.get('sync_spec_start'), "%H:%M").time()
+        sync_spec_stop = datetime.strptime(
+            self.widgets.get('sync_spec_stop'), "%H:%M").time()
+
+        # Get the current time
+        ts = datetime.now().time()
+
+        # See if we are within the sync time windows
+        sync_so2_flag = sync_so2_start < ts and ts < sync_so2_stop
+        sync_spec_flag = sync_spec_start < ts and ts < sync_spec_stop
+
+        # Apply relevant sync mode
+        if sync_so2_flag and not sync_spec_flag:
+            sync_mode = 'so2'
+        if not sync_so2_flag and sync_spec_flag:
+            sync_mode = 'spectra'
+        if sync_so2_flag and sync_spec_flag:
+            sync_mode = 'both'
+        if not sync_so2_flag and not sync_spec_flag:
+            logger.debug('Not within syncing time window')
+            return
+
+        logger.info('Beginning scanner sync')
+
+        # Pull the results folder
+        res_dir = self.widgets.get('sync_folder')
+        if not os.path.isdir(res_dir):
+            os.makedirs(res_dir)
+
+        # Get today's date
+        self.analysis_date = datetime.now().date()
+
+        # Get the volcano location
+        volc_loc = [
+            float(self.widgets.get('vlat')),
+            float(self.widgets.get('vlon'))
+        ]
+
+        # Get the wind speed
+        wind_speed = self.widgets.get('plume_speed')
+
+        # Get the default altitude and azimuth
+        default_alt = float(self.widgets.get('plume_alt'))
+        default_az = float(self.widgets.get('plume_dir'))
+
+        # Get the scan pair time
+        scan_pair_time = self.widgets.get('scan_pair_time')
+        scan_pair_flag = self.widgets.get('scan_pair_flag')
+
+        # Get the min/max scd and intensity values
+        min_scd = float(self.widgets.get('lo_scd_lim'))
+        max_scd = float(self.widgets.get('hi_scd_lim'))
+        min_int = float(self.widgets.get('lo_int_lim'))
+        max_int = float(self.widgets.get('hi_int_lim'))
+
+        self.statusBar().showMessage('Syncing...')
+
+        # Initialise the sync thread
+        self.syncThread = QThread()
+        self.syncWorker = SyncWorker(
+            res_dir, self.stations, self.analysis_date, sync_mode, volc_loc,
+            default_alt, default_az, wind_speed, scan_pair_time,
+            scan_pair_flag, min_scd, max_scd, min_int, max_int
+        )
+
+        # Move the worker to the thread
+        self.syncWorker.moveToThread(self.syncThread)
+
+        # Connect the signals
+        self.syncThread.started.connect(self.syncWorker.run)
+        self.syncWorker.finished.connect(self.sync_finished)
+        self.syncWorker.error.connect(self.update_error)
+        self.syncWorker.updateLog.connect(self.update_station_log)
+        self.syncWorker.updateStationStatus.connect(self.update_stat_status)
+        self.syncWorker.updateGuiStatus.connect(self.update_gui_status)
+        self.syncWorker.updatePlots.connect(self.update_scan_plot)
+        self.syncWorker.updateFluxPlot.connect(self.update_flux_plots)
+        self.syncWorker.finished.connect(self.syncThread.quit)
+
+        # Start the flag
+        self.syncThread.start()
 
     def newStation(self, name, com_info, loc_info, sync_flag,
                    filter_spectra_flag=False):
@@ -928,6 +1073,241 @@ class MainWindow(QMainWindow):
         s = '<pre><font color="%s">%s</font></pre>' % (color, status)
         self.logBox.appendHtml(s)
 
+    def update_error(self, error):
+        """Slot to update error messages from the worker."""
+        exctype, value, trace = error
+        logger.warning(f'Uncaught exception!\n{trace}')
+
+    def sync_finished(self):
+        """Signal end of sync."""
+        logger.info('Sync complete')
+
+    def post_finished(self):
+        """Signal end of post analysis."""
+
+    def update_gui_status(self, status):
+        """Update the status."""
+        self.statusBar().showMessage(status)
+
+    def update_stat_status(self, name, time, status):
+        """Update the station staus."""
+        self.station_status[name].setText(f'Status: {status}')
+
+    def update_station_log(self, station, log_text):
+        """Slot to update the station logs."""
+        text = self.station_log[station].toPlainText().split('\n')
+        for line in log_text[len(text):]:
+            self.station_log[station].appendPlainText(line.strip())
+
+    def update_scan_plot(self, name, fpath):
+        """Update the plots."""
+        # Get the scans in the directory
+        scan_fnames = os.listdir(f'{fpath}/{name}/so2')
+
+        # Pull the filter spectra flag
+        filter_spectra_flag = self.station_widgets[name][
+            'filter_spectra_flag'
+        ].isChecked()
+
+        if len(scan_fnames) == 0:
+            return
+
+        # Clear the axes
+        self.station_axes[name][0].clear()
+
+        # Add a legend
+        legend = self.station_axes[name][0].addLegend()
+        labels = []
+
+        # Read in the last 5 and plot
+        for i, fname in enumerate(scan_fnames[-5:][::-1]):
+
+            # Load the scan file, unpacking the angle and SO2 data
+            with xr.open_dataset(f'{fpath}/{name}/so2/{fname}') as da:
+                scan_df = da.to_dataframe()
+                scan_df['angle'] = da.coords['angle']
+                scan_df['time'] = pd.date_range(
+                    da.attrs['scan_start_time'],
+                    da.attrs['scan_end_time'],
+                    da.attrs['specs_per_scan']
+                )
+
+            if i == 0:
+                shape = [len(scan_fnames[-5:]), len(scan_df['angle'])]
+                plotx = np.zeros(shape)
+                ploty = np.zeros(shape)
+
+            # Check if the scans should be filtered
+            if filter_spectra_flag:
+                mask = np.row_stack([
+                    scan_df['SO2'] < float(self.widgets.get('lo_scd_lim')),
+                    scan_df['SO2'] > float(self.widgets.get('hi_scd_lim')),
+                    scan_df['int_av'] < float(self.widgets.get('lo_int_lim')),
+                    scan_df['int_av'] > float(self.widgets.get('hi_int_lim'))
+                ]).any(axis=0)
+                plotx[i] = scan_df['angle'].to_numpy()
+                ploty[i] = np.where(mask, 0, scan_df['SO2'].to_numpy())
+            else:
+                plotx[i] = scan_df['angle'].to_numpy()
+                ploty[i] = scan_df['SO2'].to_numpy()
+
+            # Get the scan time from the filename to use as a label
+            labels.append(f'{fname[9:11]}:{fname[11:13]}')
+
+        # Replace any nans with zeros
+        ploty = np.nan_to_num(ploty)
+
+        for i in range(shape[0]):
+
+            if i == 0:
+                width = 4
+            else:
+                width = 2
+
+            # Plot the line
+            line = pg.PlotCurveItem(plotx[i], ploty[i],
+                                    pen=pg.mkPen(color=COLORS[i], width=width))
+            self.station_axes[name][0].addItem(line)
+            legend.addItem(line, labels[i])
+
+        scan_angle = np.full([len(scan_fnames), len(plotx[0])], np.nan)
+        scan_time = np.full([len(scan_fnames), len(plotx[0])], np.nan)
+        scan_so2 = np.full([len(scan_fnames), len(plotx[0])], np.nan)
+        scan_int = np.full([len(scan_fnames), len(plotx[0])], np.nan)
+
+        for i, fname in enumerate(scan_fnames):
+
+            # Load the scan file, unpacking the angle and SO2 data
+            with xr.open_dataset(f'{fpath}/{name}/so2/{fname}') as da:
+                scan_df = da.to_dataframe()
+                scan_df['angle'] = da.coords['angle']
+                scan_df['time'] = pd.date_range(
+                    da.attrs['scan_start_time'],
+                    da.attrs['scan_end_time'],
+                    da.attrs['specs_per_scan']
+                )
+            scan_angle[i] = scan_df['angle'].to_numpy()
+            scan_so2[i] = scan_df['SO2'].to_numpy()
+            scan_int[i] = scan_df['int_av']
+
+            # Pull the time and convert to a unix timestamp
+            for j, ts in enumerate(scan_df['time']):
+                try:
+                    ds = pd.Timedelta('1s')
+                    ts_ux = (ts - pd.Timestamp("1970-01-01")) // ds
+                    scan_time[i, j] = ts_ux
+                except ValueError:
+                    pass
+
+        # Flatten the data
+        scan_angle = scan_angle.flatten()
+        scan_time = scan_time.flatten()
+        scan_so2 = scan_so2.flatten()
+        scan_int = scan_int.flatten()
+
+        # Check if the scans should be filtered
+        if filter_spectra_flag:
+            mask = np.row_stack([
+                scan_so2 < float(self.widgets.get('lo_scd_lim')),
+                scan_so2 > float(self.widgets.get('hi_scd_lim')),
+                scan_int < float(self.widgets.get('lo_int_lim')),
+                scan_int > float(self.widgets.get('hi_int_lim'))
+            ]).any(axis=0)
+            scan_so2 = np.where(mask, 0, scan_so2)
+
+        self.station_so2_data[name] = scan_so2
+
+        # # Get the colormap limits
+        map_lo_lim, map_hi_lim = self.station_cbar[name].levels()
+
+        # Normalise the data and convert to colors
+        norm_values = (scan_so2 - map_lo_lim) / (map_hi_lim - map_lo_lim)
+        np.nan_to_num(norm_values, copy=False)
+        try:
+            pens = [pg.mkPen(color=self.cmap.map(val))
+                    for val in norm_values]
+            brushes = [pg.mkBrush(color=self.cmap.map(val))
+                       for val in norm_values]
+        except AttributeError:
+            pens = None
+            brushes = None
+
+        self.station_so2_map[name].setData(x=scan_time, y=scan_angle,
+                                           pen=pens, brush=brushes)
+
+    def _update_map_colors(self, name):
+        try:
+            scan_time, scan_angle = self.station_so2_map[name].getData()
+            scan_so2 = self.station_so2_data[name]
+
+            # Get the colormap limits
+            map_lo_lim, map_hi_lim = self.station_cbar[name].levels()
+
+            # Normalise the data and convert to colors
+            norm_values = (scan_so2 - map_lo_lim) / (map_hi_lim - map_lo_lim)
+            np.nan_to_num(norm_values, copy=False)
+
+            pens = [pg.mkPen(color=self.cmap.map(val)) for val in norm_values]
+            brushes = [pg.mkBrush(color=self.cmap.map(val))
+                       for val in norm_values]
+
+            self.station_so2_map[name].setData(x=scan_time, y=scan_angle,
+                                               pen=pens, brush=brushes)
+        except ValueError:
+            pass
+
+    def update_flux_plots(self, mode):
+        """Display the calculated fluxes."""
+        if mode == 'RealTime':
+            resfpath = self.widgets.get('sync_folder')
+        elif mode == 'Post':
+            resfpath = self.widgets.get('dir_to_analyse')
+
+        min_time = []
+        max_time = []
+
+        # Cycle through the stations
+        for name, station in self.stations.items():
+
+            # Get the flux output file
+            flux_fpath = f'{resfpath}/{self.analysis_date}/{name}/' \
+                         + f'{self.analysis_date}_{name}_fluxes.csv'
+
+            # Read the flux file
+            try:
+                flux_df = pd.read_csv(flux_fpath, parse_dates=['Time [UTC]'])
+            except FileNotFoundError:
+                logger.warning(f'Flux file not found for {name}!')
+                continue
+
+            # Extract the data, converting to UNIX time for the x-axis
+            xdata = np.array([t.timestamp() for t in flux_df['Time [UTC]']])
+            flux = flux_df['Flux [kg/s]'].to_numpy()
+            flux_err = flux_df['Flux Err [kg/s]'].to_numpy()
+            plume_alt = flux_df['Plume Altitude [m]'].to_numpy()
+            plume_dir = flux_df['Plume Direction [deg]'].to_numpy()
+
+            # Also update the flux plots
+            self.flux_lines[name][0].setData(x=xdata, y=flux, height=flux_err)
+            self.flux_lines[name][1].setData(x=xdata, y=flux)
+            self.flux_lines[name][2].setData(x=xdata, y=plume_alt)
+            self.flux_lines[name][3].setData(x=xdata, y=plume_dir)
+
+            try:
+                min_time.append(np.nanmin(xdata))
+                max_time.append(np.nanmax(xdata))
+            except ValueError:
+                pass
+
+        # Scale the x-axis (avoids issues with stations without fluxes)
+        try:
+            xlim_lo = min(min_time)
+            xlim_hi = min(max_time)
+            for ax in self.flux_axes:
+                ax.setXRange(xlim_lo, xlim_hi)
+        except ValueError:
+            pass
+
     @Slot(QWidget, str, list)
     def browse(self, widget, mode='single', filterstr=None):
         """Open native file dialogue."""
@@ -1067,7 +1447,7 @@ class Widgets(dict):
         elif type(self[key]) in [QSpinBox, QDoubleSpinBox, SpinBox, DSpinBox]:
             return self[key].value()
         elif isinstance(self[key], QDateTimeEdit):
-            return self[key].time().toString('HH:MM')
+            return self[key].time().toString('HH:mm')
         else:
             raise ValueError('Widget type not recognised!')
 
@@ -1088,7 +1468,7 @@ class Widgets(dict):
         elif type(self[key]) in [QDoubleSpinBox, DSpinBox]:
             self[key].setValue(float(value))
         elif isinstance(self[key], QDateTimeEdit):
-            return self[key].setTime(QTime.fromString(value, 'HH:MM'))
+            return self[key].setTime(QTime.fromString(value, 'HH:mm'))
         else:
             raise ValueError('Widget type not recognised!')
 
@@ -1114,15 +1494,17 @@ class NewStationWizard(QDialog):
         syncComboBox.addItems(['True', 'False'])
 
         # Setup entry widgets
-        self.widgets = {'Name': QLineEdit(),
-                        'Latitude': QLineEdit(),
-                        'Longitude': QLineEdit(),
-                        'Altitude': QLineEdit(),
-                        'Azimuth': QLineEdit(),
-                        'Syncing': syncComboBox,
-                        'Host': QLineEdit(),
-                        'Username': QLineEdit(),
-                        'Password': QLineEdit()}
+        self.widgets = {
+            'Name': QLineEdit(),
+            'Latitude': QLineEdit(),
+            'Longitude': QLineEdit(),
+            'Altitude': QLineEdit(),
+            'Azimuth': QLineEdit(),
+            'Syncing': syncComboBox,
+            'Hostname': QLineEdit(),
+            'Username': QLineEdit(),
+            'Password': QLineEdit()
+        }
         for key, item in self.widgets.items():
             layout.addRow(key + ':', item)
 
@@ -1138,13 +1520,17 @@ class NewStationWizard(QDialog):
     def accept_action(self):
         """Record the station data and exit."""
         try:
-            loc_info = {'latitude':  float(self.widgets['Latitude'].text()),
-                        'longitude': float(self.widgets['Longitude'].text()),
-                        'altitude':  float(self.widgets['Azimuth'].text()),
-                        'azimuth':   float(self.widgets['Azimuth'].text())}
-            com_info = {'host': self.widgets['Host'].text(),
-                        'username': self.widgets['Username'].text(),
-                        'password': self.widgets['Password'].text()}
+            loc_info = {
+                'latitude':  float(self.widgets['Latitude'].text()),
+                'longitude': float(self.widgets['Longitude'].text()),
+                'altitude':  float(self.widgets['Azimuth'].text()),
+                'azimuth':   float(self.widgets['Azimuth'].text())
+            }
+            com_info = {
+                'hostname': self.widgets['Host'].text(),
+                'username': self.widgets['Username'].text(),
+                'password': self.widgets['Password'].text()
+            }
             if self.widgets['Syncing'].currentText() == 'True':
                 sync_flag = True
             else:
@@ -1209,7 +1595,7 @@ class EditStationWizard(QDialog):
             'Altitude': QLineEdit(str(self.loc_info['altitude'])),
             'Azimuth': QLineEdit(str(self.loc_info['azimuth'])),
             'Syncing': syncComboBox,
-            'Host': QLineEdit(str(self.com_info['host'])),
+            'Hostname': QLineEdit(str(self.com_info['hostname'])),
             'Username': QLineEdit(str(self.com_info['username'])),
             'Password': QLineEdit(str(self.com_info['password']))}
         for key, item in self.widgets.items():
@@ -1227,13 +1613,17 @@ class EditStationWizard(QDialog):
     def accept_action(self):
         """Record the station data and exit."""
         try:
-            loc_info = {'latitude':  float(self.widgets['Latitude'].text()),
-                        'longitude': float(self.widgets['Longitude'].text()),
-                        'altitude':  float(self.widgets['Azimuth'].text()),
-                        'azimuth':   float(self.widgets['Azimuth'].text())}
-            com_info = {'host': self.widgets['Host'].text(),
-                        'username': self.widgets['Username'].text(),
-                        'password': self.widgets['Password'].text()}
+            loc_info = {
+                'latitude':  float(self.widgets['Latitude'].text()),
+                'longitude': float(self.widgets['Longitude'].text()),
+                'altitude':  float(self.widgets['Azimuth'].text()),
+                'azimuth':   float(self.widgets['Azimuth'].text())
+            }
+            com_info = {
+                'hostname': self.widgets['Hostname'].text(),
+                'username': self.widgets['Username'].text(),
+                'password': self.widgets['Password'].text()
+            }
             if self.widgets['Syncing'].currentText() == 'True':
                 sync_flag = True
             else:
