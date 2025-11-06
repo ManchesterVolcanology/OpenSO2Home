@@ -1102,11 +1102,11 @@ class MainWindow(QMainWindow):
 
             # Check if the scans should be filtered
             if filter_spectra_flag:
-                mask = np.row_stack([
+                mask = np.vstack([
                     scan_df['SO2'] < float(self.widgets.get('lo_scd_lim')),
                     scan_df['SO2'] > float(self.widgets.get('hi_scd_lim')),
-                    scan_df['int_av'] < float(self.widgets.get('lo_int_lim')),
-                    scan_df['int_av'] > float(self.widgets.get('hi_int_lim'))
+                    scan_df['average_intensity'] < float(self.widgets.get('lo_int_lim')),
+                    scan_df['average_intensity'] > float(self.widgets.get('hi_int_lim'))
                 ]).any(axis=0)
                 plotx[i] = scan_df['angle'].to_numpy()
                 ploty[i] = np.where(mask, 0, scan_df['SO2'].to_numpy())
@@ -1151,7 +1151,7 @@ class MainWindow(QMainWindow):
                 )
             scan_angle[i] = scan_df['angle'].to_numpy()
             scan_so2[i] = scan_df['SO2'].to_numpy()
-            scan_int[i] = scan_df['int_av']
+            scan_int[i] = scan_df['average_intensity']
 
             # Pull the time and convert to a unix timestamp
             for j, ts in enumerate(scan_df['time']):
@@ -1170,7 +1170,7 @@ class MainWindow(QMainWindow):
 
         # Check if the scans should be filtered
         if filter_spectra_flag:
-            mask = np.row_stack([
+            mask = np.vstack([
                 scan_so2 < float(self.widgets.get('lo_scd_lim')),
                 scan_so2 > float(self.widgets.get('hi_scd_lim')),
                 scan_int < float(self.widgets.get('lo_int_lim')),
@@ -1219,12 +1219,9 @@ class MainWindow(QMainWindow):
         except ValueError:
             pass
 
-    def update_flux_plots(self, mode):
+    def update_flux_plots(self):
         """Display the calculated fluxes."""
-        if mode == 'RealTime':
-            resfpath = self.widgets.get('sync_folder')
-        elif mode == 'Post':
-            resfpath = self.widgets.get('dir_to_analyse')
+        resfpath = self.widgets.get('sync_folder')
 
         min_time = []
         max_time = []

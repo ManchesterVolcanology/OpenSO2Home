@@ -27,7 +27,7 @@ class SyncWorker(QObject):
     updateStationStatus = Signal(str, str, str)
     updateGuiStatus = Signal(str)
     updatePlots = Signal(str, str)
-    updateFluxPlot = Signal(str)
+    updateFluxPlot = Signal()
 
     def __init__(self, res_dir, stations, analysis_date, sync_mode, volc_loc,
                  default_alt, default_az, wind_speed, scan_pair_time,
@@ -110,10 +110,7 @@ class SyncWorker(QObject):
                 )
                 if not os.path.isdir(local_dir):
                     os.makedirs(local_dir)
-                remote_dir = str(
-                    '/home/pi/OpenSO2/Results/'
-                     f'{self.analysis_date}/spectra/'
-                )
+                remote_dir = f'/home/scan/Results/{self.analysis_date}/spectra/'
                 new_spec_fnames, err = station.sync(local_dir, remote_dir)
                 logging.info(
                     f'Synced {len(new_spec_fnames)} spectra scans '
@@ -128,9 +125,7 @@ class SyncWorker(QObject):
                 )
                 if not os.path.isdir(local_dir):
                     os.makedirs(local_dir)
-                remote_dir = str(
-                    f'/home/pi/OpenSO2/Results/{self.analysis_date}/so2/'
-                )
+                remote_dir = f'/home/scan/Results/{self.analysis_date}/so2/'
                 new_so2_fnames, err = station.sync(local_dir, remote_dir)
                 logging.info(
                     f'Synced {len(new_so2_fnames)} scans from {station.name}'
@@ -175,8 +170,8 @@ class SyncWorker(QObject):
                 except FileNotFoundError:
                     pass
 
-            # Plot the fluxes on the GUI
-            self.updateFluxPlot.emit('RealTime')
+        # Plot the fluxes on the GUI
+        self.updateFluxPlot.emit()
 
         self.updateGuiStatus.emit('Ready')
 
@@ -200,7 +195,8 @@ def calculate_fluxes(stations, scans, fpath, vent_loc, default_alt, default_az,
         cols = [
             'Time [UTC]', 'Scan File', 'Pair Station', 'Pair File',
             'Flux [kg/s]', 'Flux Err [kg/s]', 'Plume Altitude [m]',
-            'Plume Direction [deg]', 'Wind Speed [m/s]']
+            'Plume Direction [deg]', 'Wind Speed [m/s]'
+        ]
         flux_df = pd.DataFrame(index=np.arange(len(scans[name])), columns=cols)
 
         for i, scan_fname in enumerate(scans[name]):
@@ -215,13 +211,17 @@ def calculate_fluxes(stations, scans, fpath, vent_loc, default_alt, default_az,
                 )
 
             # Pull the scan time from the filename
-            scan_time = datetime.strptime(os.path.split(scan_fname)[1][:14],
-                                          '%Y%m%d_%H%M%S')
+            scan_time = datetime.strptime(
+                os.path.split(scan_fname)[1][:14],
+                '%Y%m%d_%H%M%S'
+            )
 
             if msk_scan_da is None:
                 logger.info(f'Scan {scan_fname} not analysed. {msg}')
-                row = [scan_time, os.path.split(scan_fname)[1], None, None,
-                       None, None, None, None, None]
+                row = [
+                    scan_time, os.path.split(scan_fname)[1], None, None,
+                    None, None, None, None, None
+                ]
                 flux_df.iloc[i] = row
                 continue
 
@@ -246,13 +246,13 @@ def calculate_fluxes(stations, scans, fpath, vent_loc, default_alt, default_az,
                 if time_diff < delta_time and scan_pair_flag:
 
                     # Read in the scan
-                    alt_scan_df = pd.read_csv(near_fname)
+                    with xr.open_dataset(near_fname) as alt_scan_da:
 
-                    # Filter the scan
-                    alt_msk_da, alt_peak, msg = filter_scan(
-                        alt_scan_df, min_scd, max_scd, min_int, max_int,
-                        plume_scd, good_scan_lim, sg_window, sg_polyn
-                    )
+                        # Filter the scan
+                        alt_msk_da, alt_peak, msg = filter_scan(
+                            alt_scan_da, min_scd, max_scd, min_int, max_int,
+                            plume_scd, good_scan_lim, sg_window, sg_polyn
+                        )
 
                     # If the alt scan is good, calculate the plume altitude
                     if alt_msk_da is None:
@@ -305,11 +305,11 @@ def filter_scan(scan_da, min_scd, max_scd, min_int, max_int, plume_scd,
                 good_scan_lim, sg_window, sg_polyn):
     """Filter scans for quality and find the centre."""
     # Filter the points for quality
-    mask = np.row_stack([
+    mask = np.vstack([
         scan_da['SO2'] < min_scd,
         scan_da['SO2'] > max_scd,
-        scan_da['int_av'] < min_int,
-        scan_da['int_av'] > max_int
+        scan_da['average_intensity'] < min_int,
+        scan_da['average_intensity'] > max_int
     ]).any(axis=0)
 
     if len(np.where(mask)[0]) > good_scan_lim*len(scan_da['SO2']):
@@ -319,8 +319,8 @@ def filter_scan(scan_da, min_scd, max_scd, min_int, max_int, plume_scd,
         [
             scan_da['SO2'] > min_scd,
             scan_da['SO2'] < max_scd,
-            scan_da['int_av'] > min_int,
-            scan_da['int_av'] < max_int
+            scan_da['average_intensity'] > min_int,
+            scan_da['average_intensity'] < max_int
         ],
         axis=0
     )

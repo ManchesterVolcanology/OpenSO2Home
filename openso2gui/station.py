@@ -21,6 +21,13 @@ class Station():
 
         self.ssh_client = paramiko.SSHClient()
         self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self.connected = False
+
+    def connect(self):
+        logger.info(f'Connecting to scanner {self.name}')
+        self.ssh_client.connect(**self.com_info)
+        self.sftp = self.ssh_client.open_sftp()
+        self.connected = True
 
 
     # Sync folder =============================================================
@@ -42,10 +49,12 @@ class Station():
             Error flag and message as [flag, 'msg']
         """
 
+        if not self.connected:
+            self.connect()
+
+        logger.info(f'Fetching files from {self.name}')
+
         try:
-            # Connect over ssh
-            self.ssh_client.connect(**self.com_info)
-            sftp = self.ssh_client.open_sftp()
 
             # Create list to hold new filenames
             new_fnames = []
@@ -55,7 +64,7 @@ class Station():
 
             # Get the file names in the remote directory
             try:
-                remote_files = sftp.listdir(remote_dir)
+                remote_files = self.sftp.listdir(remote_dir)
             except FileNotFoundError:
                 logger.info('No files found')
                 return [], [False, '']
@@ -72,11 +81,7 @@ class Station():
 
                 # Copy the file across
                 try:
-                    sftp.get(
-                        remote_dir + fname,
-                        local_dir + fname,
-                        preserve_mtime=True
-                    )
+                    self.sftp.get(remote_dir + fname, local_dir + fname)
 
                     # Add file list
                     new_fnames.append(fname)
@@ -94,27 +99,26 @@ class Station():
             )
             new_fnames = []
             err = [True, e]
+            self.sftp.close()
+            self.connected = False
 
         return new_fnames, err
 
     # Get status ==============================================================
-    def pull_status(self, filenmae='/home/scan/OpenSO2/Station/status.txt'):
+    def pull_status(self, filename='/home/scan/OpenSO2/Station/status.txt'):
         """Pull the station status."""
+        logger.info(f'Fetching {self.name} status')
+
+        if not self.connected:
+            self.connect()
         # Make sure the Station folder exists
         if not os.path.exists('Station'):
             os.makedirs('Station')
 
         try:
-            # Connect over ssh
-            self.ssh_client.connect(**self.com_info)
-            sftp = self.ssh_client.open_sftp()
 
             # Get the status file
-            sftp.get(
-                filenmae,
-                f'Station/{self.name}_status.txt',
-                preserve_mtime=True
-            )
+            self.sftp.get(filename, f'Station/{self.name}_status.txt')
 
             # Read the status file
             with open(f'Station/{self.name}_status.txt', 'r') as r:
@@ -127,6 +131,8 @@ class Station():
         except paramiko.SSHException as e:
             time, status = '-', 'N/C'
             err = [True, e]
+            self.sftp.close()
+            self.connected = False
 
         return time, status, err
 
@@ -151,6 +157,11 @@ class Station():
             Consists of the error flag (True is an error occured) and the error
             message
         """
+        logger.info(f'Fetching {self.name} logs')
+
+        if not self.connected:
+            self.connect()
+
         # Get the date to find the correct log file
         if sdate is None:
             sdate = dt.now().date()
@@ -160,16 +171,12 @@ class Station():
             os.makedirs(f'{local_dir}/{sdate}/{self.name}')
 
         try:
-            # Connect over ssh
-            self.ssh_client.connect(**self.com_info)
-            sftp = self.ssh_client.open_sftp()
 
             # Get the status file
             try:
-                sftp.get(
+                self.sftp.get(
                     f'{remote_dir}/{sdate}/{sdate}.log',
-                    f'{local_dir}/{sdate}/{self.name}/{sdate}.log',
-                    preserve_mtime=True
+                    f'{local_dir}/{sdate}/{self.name}/{sdate}.log'
                 )
                 fname = f'{local_dir}/{sdate}/{self.name}/{sdate}.log'
             except FileNotFoundError:
@@ -185,5 +192,7 @@ class Station():
         except paramiko.SSHException as e:
             fname = None
             err = [True, e]
+            self.sftp.close()
+            self.connected = False
 
         return fname, err
