@@ -16,12 +16,12 @@ from PySide6.QtWidgets import (
     QMainWindow, QApplication, QGridLayout, QScrollArea, QWidget, QTabWidget,
     QTextEdit, QLineEdit, QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox,
     QFileDialog, QToolBar, QFrame, QSplitter, QPlainTextEdit, QDialog,
-    QLabel, QPushButton, QDateTimeEdit, QDateEdit, QMessageBox, QFormLayout
+    QLabel, QPushButton, QDateTimeEdit, QMessageBox, QFormLayout
 )
 
 from openso2gui.station import Station
 from openso2gui.plume import calc_end_point
-from openso2gui.gui_functions import SyncWorker, PostAnalysisWorker
+from openso2gui.gui_functions import SyncWorker
 
 __version__ = '2.0'
 __author__ = 'Ben Esse'
@@ -218,8 +218,6 @@ class MainWindow(QMainWindow):
         controlTabHolder.addTab(qualTab, 'Quality Control')
         syncTab = QWidget()
         controlTabHolder.addTab(syncTab, 'Sync Controls')
-        postTab = QWidget()
-        controlTabHolder.addTab(postTab, 'Post Analysis')
         layout.addWidget(controlTabHolder, 0, 0)
 
         # Volcano =============================================================
@@ -400,39 +398,6 @@ class MainWindow(QMainWindow):
         nrow += 1
 
         sync_layout.setRowStretch(nrow, 10)
-
-        # Post Analysis =======================================================
-
-        # Add post analysis controls
-        post_layout = QGridLayout(postTab)
-        nrow = 0
-
-        # File path to the data
-        post_layout.addWidget(QLabel('Date to Analyse:'), nrow, 0)
-        self.widgets['date_to_analyse'] = QDateEdit(displayFormat='yyyy-MM-dd')
-        self.widgets['date_to_analyse'].setCalendarPopup(True)
-        post_layout.addWidget(self.widgets['date_to_analyse'], nrow, 1)
-        nrow += 1
-
-        # Set the path to the results
-        post_layout.addWidget(QLabel('Data Folder:'), nrow, 0)
-        self.widgets['dir_to_analyse'] = QLineEdit()
-        post_layout.addWidget(self.widgets['dir_to_analyse'], nrow, 1)
-        btn = QPushButton('Browse')
-        btn.clicked.connect(partial(
-            self.browse, self, self.widgets['dir_to_analyse'], 'folder', None
-        ))
-        post_layout.addWidget(btn, nrow, 2)
-        nrow += 1
-
-        # Add a button to control syncing
-        self.post_button = QPushButton('Run Post Analysis')
-        # self.post_button.clicked.connect(self._flux_post_analysis)
-        self.post_button.setFixedSize(150, 25)
-        post_layout.addWidget(self.post_button, nrow, 0, 1, 2)
-        nrow += 1
-
-        post_layout.setRowStretch(nrow, 10)
 
 # =============================================================================
 #   Generate the program logs
@@ -1083,9 +1048,6 @@ class MainWindow(QMainWindow):
         logger.info('Sync complete')
         self.statusBar().showMessage('Ready')
 
-    def post_finished(self):
-        """Signal end of post analysis."""
-
     def update_gui_status(self, status):
         """Update the status."""
         self.statusBar().showMessage(status)
@@ -1528,7 +1490,7 @@ class NewStationWizard(QDialog):
                 'azimuth':   float(self.widgets['Azimuth'].text())
             }
             com_info = {
-                'hostname': self.widgets['Host'].text(),
+                'hostname': self.widgets['Hostname'].text(),
                 'username': self.widgets['Username'].text(),
                 'password': self.widgets['Password'].text()
             }
